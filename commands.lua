@@ -96,13 +96,15 @@ KINDS.choice = {
     end,
 }
 
--- A whole number, 0 or more.
+-- A whole number, 0 or more; `valid` can narrow which ones.
 KINDS.count = {
     usage = function() return '<N>' end,
     run = function(spec, args)
         local n = tonumber(take(args))
         if not n or n < 0 then return false end
-        settings[spec.key] = math.floor(n)
+        n = math.floor(n)
+        if spec.valid and not spec.valid(n) then return false end
+        settings[spec.key] = n
         save()
         say(('%s: %d.'):format(spec.label, settings[spec.key]))
     end,
@@ -472,6 +474,10 @@ local COMMANDS = {
      help = 'Most rows per buff section (0 = no limit)'},
     {name = 'customlimit', kind = 'count', key = 'custom_limit', label = 'Custom row limit',
      help = 'Most custom timer rows (0 = no limit)'},
+    -- 1 would turn a buff on a single member into a "Party [1]" row.
+    {name = 'condense', kind = 'count', key = 'condense_party_threshold', label = 'Party condense threshold',
+     valid = function(n) return n == 0 or n >= 2 end,
+     help = 'Merge a buff on N+ party members into one row (0 = off, default 2)'},
 
     {name = 'pos', kind = 'position', key = 'pos', label = 'Position', help = 'Main panel position'},
     {name = 'custompos', kind = 'position', key = 'custom_pos', label = 'Custom timer position',

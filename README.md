@@ -32,7 +32,7 @@ The condensed row shows the spell name with a count suffix — `Shell V [6]` —
 ### How it works
 
 - Any buff shared by **2 or more** party members is condensed by default.
-- The threshold is controlled by the `condense_party_threshold` setting in `data/char/Timers2.xml` (default: `2`; set to `0` to disable).
+- The threshold is set with `//ti2 condense <N>` (default: `2`; `0` turns condensing off).
 - The condensed row appears in its own section alongside AOE buffs:
   - `start` mode → **BUFFS - PARTY**
   - `character` mode → **PARTY**
@@ -42,45 +42,12 @@ The condensed row shows the spell name with a count suffix — `Shell V [6]` —
 
 ### Threshold setting
 
-The threshold is not yet exposed as a command — edit it directly in the saved settings file:
-
-```xml
-<condense_party_threshold>3</condense_party_threshold>
+```
+//ti2 condense 3    condense only buffs shared by 3 or more members
+//ti2 condense 0    never condense: every member keeps their own rows
 ```
 
-## Naturalist's Roll
-
-[Naturalist's Roll](https://www.bg-wiki.com/ffxi/Naturalist%27s_Roll) lengthens Enhancing Magic its holders receive, by an amount that depends on the roll number and the Corsair's gear. Neither is visible to us, so the addon **measures** it:
-
-1. While you hold the roll, cast an Enhancing spell on yourself (Haste, Protect, Refresh, ...). An AOE that includes you counts too (Accession, Diffusion): it keeps a single AOE row, and your own copy is still read from your buff list for the measurement.
-2. The server reports how long the buff really lasts. Its difference from the addon's own estimate (which leaves the roll out) is the roll's potency. The roll adds to the gear-listed enhancing duration percentage, as bg-wiki's formula puts it, and the measurement accounts for that.
-3. Enhancing spells you then cast on party members who **also** hold the roll (seen in the party buff list) assume the same potency. An AOE row is lengthened only when everyone it covers holds the roll; otherwise it keeps the plain time, the soonest any of them runs out.
-
-Details:
-
-- Recasting a buff you still have: a buff list that shows the copy from before the cast is skipped, and the measurement waits for the one showing the new copy. (A recast within about 2 seconds of the old copy's time can't be told apart and isn't measured.)
-- A party member buffed while holding the roll **before** you have measured it is corrected as soon as your measurement comes in, provided it is still the same roll.
-- The measurement is forgotten when the roll leaves your buff list, or when its remaining time jumps up (it was rolled again, so the number may have changed). A later self-cast measures again; the latest measurement wins.
-- No measurement is taken when something else would distort it: Embolden on you, a Rune Fencer main whose job points the client does not show (its gifts would be measured as roll), a duration cap (Composure's 30 minutes, Aquaveil's cap), a spell whose base duration is random (Sneak, Invisible and Deodorize last a random 7.5 to 10 minutes), or a spell too short to tell rolls apart (one second of server rounding must move the result by 2% or less).
-
-## Rune Fencer gifts
-
-A Rune Fencer main at level 99 receives Enhancing Magic for longer: +10% at 100 job points spent and another +10% at 1200 ([bg-wiki](https://www.bg-wiki.com/ffxi/Rune_Fencer)), a separate multiplier after the duration augments.
-
-- **You as a Rune Fencer:** your own job points are known, so your own buffs include the exact gifts.
-- **A Rune Fencer in your party:** their job points are hidden, but a mastered job (2100 spent) holds both gifts, so a mastered Rune Fencer gets +20% on Enhancing spells you cast on them. Mastery is recognised by the **job mastery stars** over their head, or by a **master level above 0**, which only a mastered job can earn. Once seen, the stars count until that member changes job, so hiding them afterwards does not undo it.
-- A Rune Fencer showing neither might have no gift, one or both; their timer keeps the plain estimate, the soonest they could run out. The same holds below level 99 (gifts are off when level-synced).
-- An AOE row gets the gifts only when everyone it covers is a mastered Rune Fencer.
-
-### Embolden
-
-A Rune Fencer's [Embolden](https://www.bg-wiki.com/ffxi/Embolden) makes the next Enhancing spell they receive stronger but **halves its duration**, and is used up by it.
-
-- An Enhancing spell you cast on a party member whose buff list shows Embolden is estimated at half. The buff is treated as used straight away, so a second spell sent before their buff list updates is not halved again. Songs and Blue Magic neither use it nor are halved.
-- It combines with the rest: a mastered Rune Fencer with Embolden gets Haste at 180 x 1.2 x 0.5 = 108s.
-- An AOE row takes the soonest any target runs out, so one Emboldened target halves the row.
-- As an Emboldened Rune Fencer casting on yourself, your own copy is halved too. Embolden still blocks a Naturalist's Roll measurement.
-- Evasionist's Cape augments change Embolden; that gear is the Rune Fencer's, which the addon cannot see.
+The threshold is 0 (off) or 2 and up; a single member's buff is never shown as a party row.
 
 ---
 
@@ -128,6 +95,7 @@ All commands use `//timers2` or `//ti2`.
 | `sort <duration\|name\|player\|creation>` | Set sort order |
 | `direction <up\|down>` | `down` shows time remaining *(default)*; `up` shows time elapsed |
 | `recastdir / buffdir / customdir <asc\|desc>` | Per-column sort direction |
+| `condense <N>` | Merge a buff shared by N or more party members into one row (0 = off, default 2) — see [Party Buff Condensing](#party-buff-condensing) |
 | `recastlimit / bufflimit / customlimit <N>` | Cap rows per section (0 = no limit); `bufflimit` applies to each buff section, including the condensed party one |
 | `pos <x> <y>` | Set main panel position |
 | `custompos <x> <y>` | Set custom timer panel position |
@@ -278,46 +246,9 @@ Font names are case-insensitive and must match the Windows font family name exac
 //ti2 filter select none
 ```
 
-## File Structure
-
-```
-Timers2/
-  Timers2.lua          Main addon — settings and event wiring
-  tracker.lua          Packet handling — turns casts, buff lists and messages into timers
-  commands.lua         Chat commands, usage text and help, from one command table
-  data.lua             Data layer — state, timer collection, grouping/sorting
-  formatting.lua       Time strings and row labels shared by the themes
-  naturalist.lua       Measures Naturalist's Roll on our own buffs for party estimates
-  buff_duration.lua    Duration estimates for buffs cast on others (gear, merits, job points)
-  buff_gear.lua        Gear whose description states no number
-  themes/
-    classic.lua        Bar + icon display theme (and its default settings)
-    slim.lua           Plain text display theme (and its default settings)
-  icons/
-    abilities/         Ability icon PNGs named by recast ID (e.g. 00036.png);
-                       the shared SP abilities add the job id: 00000.16.png is
-                       Blue Mage's one-hour ability, 00254.16.png its second SP ability
-    spells/            Spell icon PNGs named by spell ID (e.g. 00004.png)
-```
-
-A row whose icon file is missing shows the coloured category dot instead. These
-one-hour ability icons do not exist yet: `00000.01.png` (Warrior), `00000.16.png`
-(Blue Mage), `00000.21.png` (Geomancer) and `00000.22.png` (Rune Fencer). Add a 32x32
-PNG with that name and the addon picks it up.
-
-## Installation
-
-Place the `Timers2` folder in your `Windower/addons/` directory and load with:
-
-```
-//lua load Timers2
-```
-
-Or add it to your profile's autoload list.
-
 ## Testing
 
-These commands are for checking the duration estimates and may change without notice.
+These commands are for checking the duration estimates for buff timing, not intended for standard users.
 
 | Command | Description |
 |---|---|
