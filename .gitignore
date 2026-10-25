@@ -1,0 +1,2 @@
+# Local test harness: needs lupa and ~10 MB of downloaded Windower data
+tests/

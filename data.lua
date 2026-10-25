@@ -1,7 +1,9 @@
 --[[
     Data layer for Timers2.
     Owns all runtime state and produces a theme-agnostic result table each frame.
-    No display primitives, texts, or images here.
+    No display primitives, texts, or images here. tracker.lua fills the timer
+    tables from packets; other modules always reach them through this module
+    (data.self_buff_timers, ...), since a reset replaces the tables.
 
     Return value of collect():
       { left = sections[], right = sections[], custom = sections[] }
@@ -10,8 +12,10 @@
     Row contract:      { cat, name, remaining, total, created_order,
                          [party_name],    -- party buff rows (none mode display)
                          [target_name],   -- party buff rows (player sort)
+                         [count],         -- condensed party rows: members holding it
                          [spell_id],      -- spell recast rows
                          [recast_id],     -- ability recast rows
+                         [job_id],        -- shared SP ability recast rows (ids 0 / 254)
                          [buff_id] }      -- buff rows (status id)
 
     left   = merged recast timers (abilities + spells), always headerless
@@ -19,8 +23,8 @@
     custom = custom timers, rendered at settings.custom_pos
 
     group_type controls right-column layout:
-      'start'     -- BUFFS-SELF / BUFFS-AOE / [player]
-      'character' -- SELF (self-buffs only) / AOE / [player]
+      'start'     -- BUFFS - SELF / BUFFS - AOE / BUFFS - PARTY / [player]
+      'character' -- SELF / AOE / PARTY / [player]
       'none'      -- single flat list; party rows carry [CharacterName]/[AOE] suffix
 
     sort_mode controls row order within every section:
@@ -37,6 +41,9 @@
 
 local res = require('resources')
 local M   = {}
+
+-- Valid sort modes, in the order the commands list them.
+M.sort_modes = {'duration', 'name', 'player', 'creation'}
 
 -------------------------------------------------------------------------------
 -- Built-in filters — always available for selection alongside user filters.
@@ -63,7 +70,7 @@ M.builtin_filters = {
 }
 
 -------------------------------------------------------------------------------
--- Mutable state — written by event handlers in Timers2.lua
+-- Mutable state — written by tracker.lua and the commands
 -------------------------------------------------------------------------------
 M.self_buff_timers     = {}   -- [buff_id]   = {name, expires, duration, created_order}
 M.party_buff_timers    = {}   -- [key]       = {name, expires, duration, ..., created_order}
@@ -72,45 +79,46 @@ M.spell_recast_peak    = {}   -- [spell_id]  = seconds at first observation
 M.ability_recast_peak  = {}   -- [recast_id] = seconds at first observation
 M.spell_recast_order   = {}   -- [spell_id]  = created_order number
 M.ability_recast_order = {}   -- [recast_id] = created_order number
-M.next_order           = 1    
-M.main_job_id          = nil  
+M.next_order           = 1
+M.main_job_id          = nil
 
 -------------------------------------------------------------------------------
 -- Static lookups
 -------------------------------------------------------------------------------
 local ability_recasts_res = res.ability_recasts
 
-M.spell_name_by_status = {}
--- sp_name_by_job[job_id]  = name of that job's recast_id=0  SP ability (1-hour)
--- sp2_name_by_job[job_id] = name of that job's recast_id=254 SP ability (1-hour II)
-local sp_name_by_job  = {}
-local sp2_name_by_job = {}
-do
-    local winning_id = {}
-    for id, spell in pairs(res.spells) do
-        if spell.status then
-            local eid = winning_id[spell.status]
-            if not eid or id < eid then
-                M.spell_name_by_status[spell.status] = spell.en or spell.name
-                winning_id[spell.status] = id
-            end
-        end
-    end
-    for id, ability in pairs(res.job_abilities) do
-        if ability.status and not M.spell_name_by_status[ability.status] then
-            M.spell_name_by_status[ability.status] = ability.en or ability.name
-        end
-    end
-    -- res.job_abilities does not expose a recast_id field, so we use the known
-    -- index formulas: SP Ability (recast 0) lives at 15+job_id, SP Ability II
-    -- (recast 254) lives at 322+job_id. Loop covers all 22 current FFXI jobs.
-    for job_id = 1, 22 do
-        local sp1 = res.job_abilities[15 + job_id]
-        if sp1 then sp_name_by_job[job_id] = sp1.en or sp1.name end
-        local sp2 = res.job_abilities[322 + job_id]
-        if sp2 then sp2_name_by_job[job_id] = sp2.en or sp2.name end
-    end
+-- Every job's one-hour ability shares recast_id 0, and its second SP ability shares
+-- recast_id 254, so the recast id alone cannot say which one is on cooldown. The
+-- main job decides, through these res.job_abilities ids, indexed by job id (WAR = 1
+-- ... RUN = 22). They are not consecutive: the first 15 jobs' abilities are ids 16
+-- to 30, and the later jobs' (Azure Lore, Wild Card, ...) were added much later.
+local SP_ABILITY_ID = {
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,    -- WAR to SMN: Mighty Strikes ... Astral Flow
+    93,                                                                -- BLU Azure Lore
+    96,                                                                -- COR Wild Card
+    135,                                                               -- PUP Overdrive
+    181,                                                               -- DNC Trance
+    210,                                                               -- SCH Tabula Rasa
+    343,                                                               -- GEO Bolster
+    356,                                                               -- RUN Elemental Sforzo
+}
+local SP2_ABILITY_ID = {
+    323, 324, 325, 326, 327, 328, 329, 330, 331, 332, 333, 334, 335, 336, 337,   -- WAR to SMN: Brazen Rush ... Astral Conduit
+    338, 339, 340, 341, 342,                                                      -- BLU to SCH: Unbridled Wisdom ... Caper Emissarius
+    -- Geomancer and Rune Fencer have no second SP ability
+}
+
+-- The name of a job's one-hour ability (or its second SP ability), or nil.
+function M.sp_ability_name(job_id, second)
+    local ability = res.job_abilities[(second and SP2_ABILITY_ID or SP_ABILITY_ID)[job_id] or -1]
+    return ability and (ability.en or ability.name) or nil
 end
+
+-- Section titles for the buff column, per group_type ('none' has no titles).
+local SECTION_TITLES = {
+    start     = {self = 'BUFFS - SELF', aoe = 'BUFFS - AOE', party = 'BUFFS - PARTY'},
+    character = {self = 'SELF',         aoe = 'AOE',         party = 'PARTY'},
+}
 
 -------------------------------------------------------------------------------
 -- Helpers
@@ -120,15 +128,16 @@ local WRAP_SECS  = 0x100000000 / 60   -- Seconds per uint32 overflow cycle (~2.2
 
 function M.buff_remaining(ts)
     if ts == 0 then return nil end
+    local now = os.time()
     -- Determine how many full wrap cycles have elapsed since the FFXI epoch.
-    local base_wraps = math.floor((os.time() - FFXI_EPOCH) / WRAP_SECS)
+    local base_wraps = math.floor((now - FFXI_EPOCH) / WRAP_SECS)
     -- Reconstruct the Unix expiry time for this cycle. If it's already in the
     -- past the buff's expiry has crossed into the next cycle, so advance by one.
     local expiry = FFXI_EPOCH + base_wraps * WRAP_SECS + ts / 60
-    if expiry < os.time() then
+    if expiry < now then
         expiry = expiry + WRAP_SECS
     end
-    return math.max(0, math.floor(expiry - os.time()))
+    return math.max(0, math.floor(expiry - now))
 end
 
 local function append(dst, src)
@@ -152,14 +161,12 @@ function M.collect(settings)
     local sort_key   = (flt and flt.sort ~= '' and flt.sort) or settings.sort_mode or 'duration'
 
     -- Returns the display name for a recast group.
-    -- recast_id=0 and 254 are shared SP ability slots; the per-job name is resolved
-    -- from sp_name_by_job / sp2_name_by_job built at startup from res.job_abilities.
+    -- recast_id=0 and 254 are shared SP ability slots; the per-job name comes from
+    -- M.sp_ability_name (the explicit id tables above).
     local function get_ability_name(recast_id)
-        if recast_id == 0 and M.main_job_id then
-            return sp_name_by_job[M.main_job_id]
-        end
-        if recast_id == 254 and M.main_job_id then
-            return sp2_name_by_job[M.main_job_id]
+        if (recast_id == 0 or recast_id == 254) and M.main_job_id then
+            local name = M.sp_ability_name(M.main_job_id, recast_id == 254)
+            if name then return name end       -- otherwise fall back to the generic recast name
         end
         if ability_recasts_res then
             local ar = ability_recasts_res[recast_id]
@@ -184,38 +191,50 @@ function M.collect(settings)
         return true
     end
 
+    local function cmp(x, y)
+        if x < y then return -1 elseif x > y then return 1 end
+        return 0
+    end
+
+    -- Strict ordering for table.sort: primary key by direction, then creation
+    -- order and name so rows that tie keep a fixed position between refreshes.
     local function apply_sort_dir(rows, asc)
-        if sort_key == 'name' then
-            table.sort(rows, function(a, b)
-                return asc and (a.name < b.name) or (a.name > b.name)
-            end)
-        elseif sort_key == 'creation' then
-            table.sort(rows, function(a, b)
-                local ao = a.created_order or 0
-                local bo = b.created_order or 0
-                return asc and (ao < bo) or (ao > bo)
-            end)
-        elseif sort_key == 'player' then
-            table.sort(rows, function(a, b)
-                local an = a.target_name or ''
-                local bn = b.target_name or ''
-                if an ~= bn then return an < bn end
-                return asc and (a.remaining < b.remaining) or (a.remaining > b.remaining)
-            end)
-        else  -- 'duration'
-            table.sort(rows, function(a, b)
-                return asc and (a.remaining < b.remaining) or (a.remaining > b.remaining)
-            end)
-        end
+        local dir = asc and 1 or -1
+        table.sort(rows, function(a, b)
+            local c
+            if sort_key == 'name' then
+                c = dir * cmp(a.name, b.name)
+            elseif sort_key == 'creation' then
+                c = dir * cmp(a.created_order or 0, b.created_order or 0)
+            elseif sort_key == 'player' then
+                c = cmp(a.target_name or '', b.target_name or '')   -- players always A-Z
+                if c == 0 then c = dir * cmp(a.remaining, b.remaining) end
+            else  -- 'duration'
+                c = dir * cmp(a.remaining, b.remaining)
+            end
+            if c == 0 then c = cmp(a.created_order or 0, b.created_order or 0) end
+            if c == 0 then c = cmp(a.name, b.name) end
+            return c < 0
+        end)
     end
 
     --------------------------------------------------------------------------
     -- Gather
     --------------------------------------------------------------------------
 
+    -- A recast's bar length is the first value seen for it, which only means
+    -- something while the section keeps watching. A hidden section forgets its
+    -- peaks, so a recast that restarted meanwhile is not drawn against the old one.
+    local function forget_peaks(peaks, orders)
+        for id in pairs(peaks) do peaks[id] = nil end
+        for id in pairs(orders) do orders[id] = nil end
+    end
+
     -- Ability recasts
     local ability_rows = {}
-    if settings.show_abilities and cat_ok('ability') then
+    if not (settings.show_abilities and cat_ok('ability')) then
+        forget_peaks(M.ability_recast_peak, M.ability_recast_order)
+    else
         local recasts = windower.ffxi.get_ability_recasts()
         if recasts then
             for recast_id, seconds in pairs(recasts) do
@@ -239,6 +258,9 @@ function M.collect(settings)
                                 cat='ability',
                                 name=aname,
                                 recast_id=recast_id,
+                                -- recast ids 0 and 254 are shared by every job's SP abilities;
+                                -- the job tells the theme which icon file to use
+                                job_id=(recast_id == 0 or recast_id == 254) and M.main_job_id or nil,
                                 remaining=seconds, total=peak,
                                 created_order=M.ability_recast_order[recast_id] or 0,
                             })
@@ -254,7 +276,9 @@ function M.collect(settings)
 
     -- Spell recasts
     local spell_rows = {}
-    if settings.show_spells and cat_ok('spell') then
+    if not (settings.show_spells and cat_ok('spell')) then
+        forget_peaks(M.spell_recast_peak, M.spell_recast_order)
+    else
         local recasts = windower.ffxi.get_spell_recasts()
         if recasts then
             for spell_id, cs in pairs(recasts) do
@@ -292,74 +316,56 @@ function M.collect(settings)
         end
     end
 
-    -- Self buffs
-    local self_buff_rows = {}
-    if settings.show_buffs and cat_ok('buff') then
-        for buff_id, entry in pairs(M.self_buff_timers) do
+    -- Buff timers, ours and the party's. Expired entries are dropped from the
+    -- table; a live one becomes a row unless the blacklist or filter hides it.
+    local show_buffs = settings.show_buffs and cat_ok('buff')
+    local function buff_rows(timers, each)
+        if not show_buffs then return end
+        for key, entry in pairs(timers) do
             local remaining = entry.expires - now
-            if remaining > 0 then
-                if entry.name
+            if remaining <= 0 then
+                timers[key] = nil
+            elseif entry.name
                    and not settings.buff_blacklist[entry.name:lower()]
                    and wl_ok(entry.name)
-                   and not (flt and flt.buff_exclude and flt.buff_exclude(buff_id, entry.name)) then
-                    table.insert(self_buff_rows, {
-                        cat='buff', name=entry.name,
-                        buff_id=buff_id,
-                        remaining=remaining, total=entry.duration,
-                        created_order=entry.created_order or 0,
-                    })
-                end
-            else
-                M.self_buff_timers[buff_id] = nil
+                   and not (flt and flt.buff_exclude and flt.buff_exclude(entry.status_id or key, entry.name)) then
+                each(entry, {
+                    cat='buff', name=entry.name,
+                    buff_id=entry.status_id or key,
+                    remaining=remaining, total=entry.duration,
+                    created_order=entry.created_order or 0,
+                })
             end
         end
     end
+
+    local self_buff_rows = {}
+    buff_rows(M.self_buff_timers, function(_, row) table.insert(self_buff_rows, row) end)
 
     -- Party buffs — AOE into aoe_rows, single-target into by_player
     local by_player    = {}
     local player_order = {}
     local aoe_rows     = {}
-    if settings.show_buffs and cat_ok('buff') then
-        for key, entry in pairs(M.party_buff_timers) do
-            local remaining = entry.expires - now
-            if remaining > 0 then
-                if entry.name
-                   and not settings.buff_blacklist[entry.name:lower()]
-                   and wl_ok(entry.name)
-                   and not (flt and flt.buff_exclude and flt.buff_exclude(entry.status_id, entry.name)) then
-                    if entry.is_aoe then
-                        table.insert(aoe_rows, {
-                            cat='buff', name=entry.name,
-                            buff_id=entry.status_id,
-                            remaining=remaining, total=entry.duration,
-                            target_name='AOE',
-                            created_order=entry.created_order or 0,
-                        })
-                    else
-                        if not entry.target_name and entry.target_id then
-                            local mob = windower.ffxi.get_mob_by_id(entry.target_id)
-                            if mob and mob.name then entry.target_name = mob.name end
-                        end
-                        local pname = entry.target_name or 'Unknown'
-                        if not by_player[pname] then
-                            by_player[pname] = {}
-                            table.insert(player_order, pname)
-                        end
-                        table.insert(by_player[pname], {
-                            cat='buff', name=entry.name,
-                            buff_id=entry.status_id,
-                            remaining=remaining, total=entry.duration,
-                            target_name=entry.target_name,
-                            created_order=entry.created_order or 0,
-                        })
-                    end
-                end
-            else
-                M.party_buff_timers[key] = nil
-            end
+    buff_rows(M.party_buff_timers, function(entry, row)
+        if entry.is_aoe then
+            row.target_name = 'AOE'
+            table.insert(aoe_rows, row)
+            return
         end
-        table.sort(player_order)
-    end
+        if not entry.target_name and entry.target_id then
+            local mob = windower.ffxi.get_mob_by_id(entry.target_id)
+            if mob and mob.name then entry.target_name = mob.name end
+        end
+        local pname = entry.target_name or 'Unknown'
+        if not by_player[pname] then
+            by_player[pname] = {}
+            table.insert(player_order, pname)
+        end
+        row.group_id    = entry.group_id
+        row.target_name = entry.target_name
+        table.insert(by_player[pname], row)
+    end)
+    table.sort(player_order)
 
     -- Custom timers
     local custom_rows = {}
@@ -379,51 +385,34 @@ function M.collect(settings)
     end
 
     --------------------------------------------------------------------------
-    -- Sort and limit (per-bucket direction, then truncate)
-    --------------------------------------------------------------------------
-    local recast_limit = settings.recast_limit or 0
-    local buff_limit   = settings.buff_limit   or 0
-    local custom_limit = settings.custom_limit or 0
-
-    local recast_rows = {}
-    append(recast_rows, ability_rows)
-    append(recast_rows, spell_rows)
-    apply_sort_dir(recast_rows, recast_asc)
-    apply_limit(recast_rows, recast_limit)
-
-    apply_sort_dir(self_buff_rows, buff_asc)
-    apply_limit(self_buff_rows, buff_limit)
-
-    apply_sort_dir(aoe_rows, buff_asc)
-    apply_limit(aoe_rows, buff_limit)
-
-    for _, pname in ipairs(player_order) do
-        apply_sort_dir(by_player[pname], buff_asc)
-        apply_limit(by_player[pname], buff_limit)
-    end
-
-    apply_sort_dir(custom_rows, custom_asc)
-    apply_limit(custom_rows, custom_limit)
-
-    --------------------------------------------------------------------------
     -- Condense party buffs: when the same buff appears on N+ party members,
     -- collapse all their rows into one synthetic row showing the earliest
     -- expiry, with a `count` field for the theme to display (e.g. "Shell V [6]").
+    -- This looks at every row, so it runs before the row limits below. The
+    -- player rows are sorted first: a condensed row takes its name and total
+    -- from the first row of its group, which must not change between refreshes.
     --------------------------------------------------------------------------
+    for _, pname in ipairs(player_order) do
+        apply_sort_dir(by_player[pname], buff_asc)
+    end
+
     local condense_threshold = settings.condense_party_threshold or 2
     local condensed_party_rows = {}
     if condense_threshold > 0 then
         -- Tally how many player buckets carry each buff_id (one count per pname, not per row).
         -- Counting per-row instead would inflate the count when multiple players share the
         -- same pname bucket (e.g. all resolve to 'Unknown'), triggering premature condensation.
-        local buff_tally = {}  -- [buff_id] = {name, total, min_remaining, min_created, count}
+        local buff_tally = {}  -- [group] = {buff_id, name, total, min_remaining, min_created, count}
+        -- A group is the status id, except songs, where each spell is its own group
+        -- (Valor Minuet IV and V share a status but are separate buffs).
         for _, pname in ipairs(player_order) do
             local seen = {}  -- buff_ids already counted for this pname bucket
-            for _, row in ipairs(by_player[pname] or {}) do
-                local bid = row.buff_id
+            for _, row in ipairs(by_player[pname]) do
+                local bid = row.group_id or row.buff_id
                 if bid ~= nil then
                     if not buff_tally[bid] then
                         buff_tally[bid] = {
+                            buff_id=row.buff_id,
                             name=row.name, total=row.total,
                             min_remaining=row.remaining,
                             min_created=row.created_order,
@@ -442,14 +431,14 @@ function M.collect(settings)
         end
 
         -- For each buff that meets the threshold, build a condensed row.
-        -- Track condensed buff_ids so the assembly can skip those rows in player sections.
+        -- Track condensed buff_ids so the player sections can skip those rows.
         local condensed_ids = {}
         for bid, tally in pairs(buff_tally) do
             if tally.count >= condense_threshold then
                 condensed_ids[bid] = true
                 table.insert(condensed_party_rows, {
                     cat='buff', name=tally.name,
-                    buff_id=bid,
+                    buff_id=tally.buff_id,
                     remaining=tally.min_remaining, total=tally.total,
                     count=tally.count,
                     target_name='Party',
@@ -458,20 +447,41 @@ function M.collect(settings)
             end
         end
 
-        apply_sort_dir(condensed_party_rows, buff_asc)
-
-        -- Filter player sections: build per-player row lists excluding condensed buff_ids.
-        -- Replaces by_player entries in-scope so the assembly below needs no changes.
+        -- Player sections keep only the rows that were not condensed.
         for _, pname in ipairs(player_order) do
             local filtered = {}
             for _, row in ipairs(by_player[pname]) do
-                if not condensed_ids[row.buff_id] then
+                if not condensed_ids[row.group_id or row.buff_id] then
                     table.insert(filtered, row)
                 end
             end
             by_player[pname] = filtered
         end
     end
+
+    --------------------------------------------------------------------------
+    -- Sort and limit (per-bucket direction, then truncate)
+    --------------------------------------------------------------------------
+    local recast_limit = settings.recast_limit or 0
+    local buff_limit   = settings.buff_limit   or 0
+    local custom_limit = settings.custom_limit or 0
+
+    local recast_rows = {}
+    append(recast_rows, ability_rows)
+    append(recast_rows, spell_rows)
+    apply_sort_dir(recast_rows, recast_asc)
+    apply_limit(recast_rows, recast_limit)
+
+    for _, rows in ipairs({self_buff_rows, aoe_rows, condensed_party_rows}) do
+        apply_sort_dir(rows, buff_asc)
+        apply_limit(rows, buff_limit)
+    end
+    for _, pname in ipairs(player_order) do
+        apply_limit(by_player[pname], buff_limit)   -- already sorted for condensing
+    end
+
+    apply_sort_dir(custom_rows, custom_asc)
+    apply_limit(custom_rows, custom_limit)
 
     --------------------------------------------------------------------------
     -- Assemble sections
@@ -491,62 +501,34 @@ function M.collect(settings)
     end
 
     -- Right: buff timers
-    if group_type == 'none' then
+    local titles = group_type ~= 'none' and (SECTION_TITLES[group_type] or SECTION_TITLES.start)
+    if not titles then  -- 'none': one flat list, party rows tagged with their target
         local all = {}
         append(all, self_buff_rows)
         for _, row in ipairs(aoe_rows) do
             row.party_name = 'AOE'
             table.insert(all, row)
         end
-        for _, row in ipairs(condensed_party_rows) do
-            table.insert(all, row)
-        end
+        append(all, condensed_party_rows)
         for _, pname in ipairs(player_order) do
-            local prows = by_player[pname]
-            if prows and #prows > 0 then
-                for _, row in ipairs(prows) do
-                    row.party_name = pname
-                    table.insert(all, row)
-                end
+            for _, row in ipairs(by_player[pname]) do
+                row.party_name = pname
+                table.insert(all, row)
             end
         end
         apply_sort_dir(all, buff_asc)
         if #all > 0 then
             table.insert(right_sections, {title=nil, rows=all})
         end
-
-    elseif group_type == 'character' then
-        if #self_buff_rows > 0 then
-            table.insert(right_sections, {title='SELF', rows=self_buff_rows})
+    else
+        local function section(title, rows)
+            if #rows > 0 then table.insert(right_sections, {title=title, rows=rows}) end
         end
-        if #aoe_rows > 0 then
-            table.insert(right_sections, {title='AOE', rows=aoe_rows})
-        end
-        if #condensed_party_rows > 0 then
-            table.insert(right_sections, {title='PARTY', rows=condensed_party_rows})
-        end
+        section(titles.self,  self_buff_rows)
+        section(titles.aoe,   aoe_rows)
+        section(titles.party, condensed_party_rows)
         for _, pname in ipairs(player_order) do
-            local prows = by_player[pname]
-            if prows and #prows > 0 then
-                table.insert(right_sections, {title=pname, rows=prows})
-            end
-        end
-
-    else  -- 'start'
-        if #self_buff_rows > 0 then
-            table.insert(right_sections, {title='BUFFS - SELF', rows=self_buff_rows})
-        end
-        if #aoe_rows > 0 then
-            table.insert(right_sections, {title='BUFFS - AOE', rows=aoe_rows})
-        end
-        if #condensed_party_rows > 0 then
-            table.insert(right_sections, {title='BUFFS - PARTY', rows=condensed_party_rows})
-        end
-        for _, pname in ipairs(player_order) do
-            local prows = by_player[pname]
-            if prows and #prows > 0 then
-                table.insert(right_sections, {title=pname, rows=prows})
-            end
+            section(pname, by_player[pname])
         end
     end
 
