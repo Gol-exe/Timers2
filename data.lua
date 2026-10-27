@@ -329,8 +329,11 @@ function M.collect(settings)
                    and not settings.buff_blacklist[entry.name:lower()]
                    and wl_ok(entry.name)
                    and not (flt and flt.buff_exclude and flt.buff_exclude(entry.status_id or key, entry.name)) then
+                -- The name is shown with its suffix (a roll's total, "Chaos Roll
+                -- XI"); filters and icons go by the plain name.
                 each(entry, {
-                    cat='buff', name=entry.name,
+                    cat='buff', name=entry.suffix and (entry.name .. ' ' .. entry.suffix) or entry.name,
+                    icon_name=entry.name,
                     buff_id=entry.status_id or key,
                     remaining=remaining, total=entry.duration,
                     created_order=entry.created_order or 0,
@@ -413,7 +416,7 @@ function M.collect(settings)
                     if not buff_tally[bid] then
                         buff_tally[bid] = {
                             buff_id=row.buff_id,
-                            name=row.name, total=row.total,
+                            name=row.name, icon_name=row.icon_name, total=row.total,
                             min_remaining=row.remaining,
                             min_created=row.created_order,
                             count=0,
@@ -437,7 +440,7 @@ function M.collect(settings)
             if tally.count >= condense_threshold then
                 condensed_ids[bid] = true
                 table.insert(condensed_party_rows, {
-                    cat='buff', name=tally.name,
+                    cat='buff', name=tally.name, icon_name=tally.icon_name,
                     buff_id=tally.buff_id,
                     remaining=tally.min_remaining, total=tally.total,
                     count=tally.count,

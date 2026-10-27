@@ -101,7 +101,8 @@ local function resolve_icon(row)
     if row.cat == 'spell'   then return row.spell_id,  'spell'   end
     if row.cat == 'ability' then return row.recast_id, 'ability', row.job_id end
     if row.cat == 'buff' then
-        local ico = row.name and icon_by_name[row.name:lower()]
+        local name = row.icon_name or row.name     -- "Chaos Roll", not "Chaos Roll XI"
+        local ico = name and icon_by_name[name:lower()]
         if ico then return ico.id, ico.cat end
         return row.buff_id, 'buff'
     end

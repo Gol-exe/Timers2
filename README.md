@@ -1,6 +1,6 @@
 # Timers2
 
-A Windower 4 Lua addon that tracks job ability recasts, spell recasts, and buff durations for spells and abilities you cast.
+A Windower 4 Lua addon that tracks job ability recasts, spell recasts, and buff durations for spells and abilities you cast, on you and on your party.
 
 Only timers the addon witnesses are tracked — buffs active before the addon loads are intentionally ignored.
 
@@ -38,7 +38,6 @@ The condensed row shows the spell name with a count suffix — `Shell V [6]` —
   - `character` mode → **PARTY**
   - `none` mode → inline in the flat list
 - If a buff is on fewer members than the threshold, each member's timer is still shown individually in their own player section as before.
-- Condensing looks at every row before `bufflimit` trims the sections, so a shared buff is condensed even when one member's own list would have been cut before reaching it.
 
 ### Threshold setting
 
@@ -191,7 +190,7 @@ Display direction (elapsed vs remaining) is controlled by the global `direction`
 
 | Command | Description |
 |---|---|
-| `help` | Print command reference in chat (generated from the same table the commands run from) |
+| `help` | Print command reference in chat |
 
 ## Available Fonts
 

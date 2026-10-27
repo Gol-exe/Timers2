@@ -29,14 +29,17 @@
 
     Scope: every Enhancing Magic spell with a duration, including the self-only
     ones (Spikes): our own copy's estimate and the Naturalist's Roll measurement
-    use them too. Plus buff songs and Blue Magic buffs. Ninjutsu (Utsusemi),
-    Dark and Divine Magic (Endark, Dread Spikes, Klimaform), aura (Indi/Geo) and
-    enemy-targeted (debuffs, Absorb, Elegy/Lullaby) spells are left out.
+    use them too. Plus buff songs, Blue Magic buffs, Indi- spells, the self
+    Dark Magic buffs (Endark, Dread Spikes, Klimaform) and self Ninjutsu. Divine
+    Magic, Geo- luopans and enemy-targeted (debuffs, Absorb, Elegy/Lullaby)
+    spells are left out.
 
-    Modelled: equipped duration gear (songs, enhancing, Regen flat seconds),
-    duration augments (enhancing %, all-songs levels, relic-hands merit
-    augment), Red Mage enhancing merits/job points, Bard song job points (Tenuto, Clarion
-    Call, Marcato, 1200 JP gift), White Mage and Scholar Regen job
+    Modelled: equipped duration gear (songs, enhancing, Regen flat seconds;
+    on our own copy Refresh-received and Enspell seconds), duration augments
+    (enhancing %, all-songs levels, relic-hands merit augment, Evasionist's
+    Cape Embolden), Red Mage enhancing merits/job points, Bard song job points (Tenuto, Clarion
+    Call, Marcato, 1200 JP gift), Soul Voice / Marcato on Hymnus, Mazurka and
+    Scherzo, White Mage and Scholar Regen job
     points, Light Arts and Tabula Rasa Regen bonus,
     Perpetuance (incl. Savant's/Arbatel bracers), Composure armor-set bonus on
     others, Troubadour, Blue Mage Diffusion (merits + Charuqs) and Unbridled
@@ -76,6 +79,7 @@ local LIGHT_ARTS     = 358
 local ADDENDUM_WHITE = 401
 local TABULA_RASA    = 377
 local MARCATO        = 231
+local SOUL_VOICE     = 52
 local TENUTO         = 455
 local CLARION_CALL   = 499
 
@@ -83,7 +87,7 @@ local CLARION_CALL   = 499
 local COMPOSURE_CAP = 1800
 
 -- Job ids (Windower res.jobs)
-local WHM, BRD, RDM, BLU, SCH, RUN = 3, 10, 5, 16, 20, 22
+local WHM, BRD, RDM, BLU, SCH, RUN, NIN, GEO = 3, 10, 5, 16, 20, 22, 13, 21
 
 -- Rune Fencer job point gifts (bg-wiki "Rune Fencer"): Enhancing Magic received
 -- duration +10% at 100 job points spent and another +10% at 1200. Like every
@@ -99,8 +103,10 @@ M.MASTERED_RUNE_FENCER_GIFTS = M.rune_fencer_gifts(2100)
 
 -- Embolden (Rune Fencer, buff 534): the next Enhancing spell its holder
 -- receives is stronger but lasts half as long, and uses the buff up (bg-wiki
--- "Embolden"). Evasionist's Cape augments change it; that gear is the Rune
--- Fencer's, which we cannot see.
+-- "Embolden"). An Evasionist's Cape '"Embolden"+N' augment gives back N% of
+-- the duration. That gear is the Rune Fencer's: on our own copy it is our cape,
+-- read when the spell lands as the Timers plugin does; on anyone else's we
+-- cannot see it.
 M.EMBOLDEN = 534
 local EMBOLDEN_DURATION = 0.5
 
@@ -171,11 +177,58 @@ for _, id in ipairs({108, 110, 111, 477, 504}) do
     spells[id].regen      = true
 end
 
+-- Gear seconds that only reach our own copy, added before the multipliers like
+-- Regen gear: Refresh "effects received" (Gishdubar Sash, Grapevine Cape, ...)
+-- is the receiver's gear, so it never applies to a Refresh we cast on others;
+-- Enspells ("Sword enhancement spell duration") are self-only.
+for _, id in ipairs({109, 473, 894}) do spells[id].own_gear = 'refresh' end
+for _, id in ipairs(join(span(100, 105), span(312, 317))) do spells[id].own_gear = 'enspell' end
+
 -- Bar-element / Bar-status: flat 8 minutes; enhancing skill only affects potency.
 add('enhancing', 480, join(span(60, 78), span(84, 92)))
 
 -- Reraise I-IV: flat, unaffected by modifiers.
 add('fixed', 3600, {135, 141, 142, 848})
+
+-------------------------------------------------------------------------------
+-- Indi- spells ('indi'): bg-wiki "Indicolure": 180s; "Indicolure spell
+-- duration" gear seconds are added to the base, then augments ("Indi. eff.
+-- dur. +N", N percent) multiply like Enhancing Magic duration augments. The
+-- Geomancer job point category adds 2s per level (Windower's job point text).
+-------------------------------------------------------------------------------
+add('indi', 180, span(768, 797))
+
+-- An Indi- spell's own status (Haste 580, Frailty 558, ...) is the aura's
+-- effect: re-applied every few seconds with a short time to whoever is in
+-- range, and for the debuff auras never on the holder at all. What lasts as
+-- long as the spell is the holder's "Colure Active" (612), on ourselves and on
+-- an Entrust target alike, and a new Indi- spell replaces it. So the timers
+-- follow 612: our own takes its time from our buff list (and is calibrated
+-- like any buff), a party member's is seen there only as present.
+for id = 768, 797 do
+    spells[id].status = 612
+    spells[id].colure = true
+end
+
+-------------------------------------------------------------------------------
+-- Dark Magic buffs on ourselves ('dark'): "Dark magic duration +N%" gear
+-- (Ratri Sollerets) multiplies. Klimaform is Dark Magic too, and Composure
+-- triples it (bg-wiki "Klimaform").
+-------------------------------------------------------------------------------
+add('dark', 180, {277, 311, 856})                                          -- Dread Spikes, Endark, Endark II
+add('dark', 300, {287})                                                    -- Klimaform
+spells[287].composure = true
+
+-------------------------------------------------------------------------------
+-- Ninjutsu on ourselves ('ninjutsu'): the Ninja job point gift at 550 spent
+-- adds 10% duration (bg-wiki "Ninja"). Bases are the resources'.
+-------------------------------------------------------------------------------
+add('ninjutsu', 420, {318, 353})                                           -- Monomi: Ichi, Tonko: Ichi
+add('ninjutsu', 600, {354})                                                -- Tonko: Ni
+add('ninjutsu', 900, {338, 339, 340})                                      -- Utsusemi: Ichi, Ni, San
+add('ninjutsu', 300, {505, 506, 507, 509})                                 -- Gekka, Yain, Myoshu, Kakka
+add('ninjutsu', 60,  {510})                                                -- Migawari: Ichi
+local NINJA_GIFT = 0.10
 
 -------------------------------------------------------------------------------
 -- Songs ('song': Troubadour doubles it). Buff songs only.
@@ -206,6 +259,11 @@ song_family('Hymnus',   {464})
 song_family('Mazurka',  {465, 467})
 song_family('Scherzo',  {470})
 
+-- Songs without potency, whose duration Soul Voice doubles or else Marcato
+-- multiplies by 1.5 (bg-wiki "Marcato": multiplicative with Troubadour, does not
+-- stack with Soul Voice).
+local MARCATO_FAMILIES = {Hymnus = true, Mazurka = true, Scherzo = true}
+
 -------------------------------------------------------------------------------
 -- Blue Magic buffs
 -------------------------------------------------------------------------------
@@ -224,6 +282,7 @@ add('blu', 90,  {547, 642, 658, 664, 700, 737, 655})      -- Cocoon, Amplificati
 add('blu', 60,  {538})                                    -- Memento Mori
 add('blu', 30,  {574})                                    -- Feather Barrier
 spells[664].regen_gear = true                               -- Telchine Chasuble etc. extend Regeneration
+spells[662].own_gear   = 'refresh'                          -- Battery Charge is a Refresh effect
 
 -- Plasma Charge lasts a random 10 to 15 minutes (confirmed in game; Windower lists 750
 -- = the middle, and one cast measured 14:51), so the estimate can only be the expected
@@ -442,8 +501,26 @@ end
 
 local stats_cache = {}   -- [item_id] = stats
 
+-- Job ability durations: '"Berserk" duration +15', '"Jig" duration +40%',
+-- '"Vallation" and "Valiance" duration +15', '"Vallation/Valiance" duration +20'.
+-- [ability name as written] = {sec = seconds} or {pct = fraction}.
+local function ability_durations(text)
+    local found = {}
+    local function put(names, value, percent)
+        for name in names:gmatch('[^/]+') do
+            found[name] = percent == '%' and {pct = tonumber(value) / 100} or {sec = tonumber(value)}
+        end
+    end
+    for first, second, value, percent in text:gmatch('"([^"]+)" and "([^"]+)" duration ?%+(%d+)(%%?)') do
+        put(first, value, percent)
+        put(second, value, percent)
+    end
+    for names, value, percent in text:gmatch('"([^"]+)" duration ?%+(%d+)(%%?)') do put(names, value, percent) end
+    return found
+end
+
 local function parse_description(item_id)
-    local stats = {fam = {}}
+    local stats = {fam = {}, ja = {}}
     if description_text[item_id] == nil then load_descriptions({item_id}) end
     local text = description_text[item_id]
     if not text then return stats end
@@ -467,6 +544,24 @@ local function parse_description(item_id)
     value = text:match('"Perpetuance"%+(%d+)%%')
     if value then stats.perp = tonumber(value) / 100 end
 
+    value = text:match('[Dd]uration of "?Refresh"? effects? received %+(%d+)')
+    if value then stats.refresh = tonumber(value) end
+
+    value = text:match('[Ss]word enhancement spell duration %+(%d+)')
+    if value then stats.enspell = tonumber(value) end
+
+    -- Corsair rolls and Blood Pact wards (ability_duration.lua)
+    value = text:match('"Phantom Roll" duration ?%+(%d+)')
+    if value then stats.roll = tonumber(value) end
+    value = text:match('[Ss]ummoning magic skill %+(%d+)')
+    if value then stats.summoning = tonumber(value) end
+
+    -- '"Indicolure" spell duration +15', 'Indicolure effect duration +20'
+    value = text:match('Indicolure"? spell duration %+(%d+)') or text:match('Indicolure"? duration %+(%d+)')
+    if value then stats.indi = tonumber(value) end
+    value = text:match('[Dd]ark magic duration ?%+(%d+)%%')
+    if value then stats.dark = tonumber(value) / 100 end
+
     value = text:match('[Ss]ong duration %+(%d+)%%')
     if value then stats.song = tonumber(value) / 100 end
     local numeral = text:match('ncreases? song duration ([IVX]+)%f[%A]')
@@ -486,6 +581,12 @@ local function parse_description(item_id)
     end
 
     stats.composure = text:find('Set: Augments "Composure"', 1, true) ~= nil
+    stats.ja = ability_durations(text)
+    -- 'Increases "Jig" duration' / 'Extends duration of "Hide"' name an ability
+    -- duration without a number
+    local nameless = false
+    for name in text:gmatch('ncreases "([^"]+)" duration') do nameless = nameless or not stats.ja[name] end
+    for name in text:gmatch('xtends duration of "([^"]+)"') do nameless = nameless or not stats.ja[name] end
 
     -- A duration effect that is named but carries no number: the scan cannot
     -- read it. Reported by describe_gear so it can be added to buff_gear.lua.
@@ -493,6 +594,9 @@ local function parse_description(item_id)
         or (text:find('"Regen" duration', 1, true) and not stats.regen)
         or (text:find('ncreases song duration', 1, true) and not stats.song and not stats.levels)
         or (text:find('Enhances "Perpetuance"', 1, true) and not stats.perp)
+        or (text:find('uration of "?Refresh"? effects? received') and not stats.refresh)
+        or (text:find('"Phantom Roll" duration', 1, true) and not stats.roll)
+        or nameless
         or false
     return stats
 end
@@ -560,8 +664,14 @@ end
 --   "All Songs+N" / "All songs +N"  N levels, 10% each
 --   "Enhancing Magic duration"      relic hands merit augment
 --   'Enhances "Diffusion" effect'   Blue Mage Charuqs
-local function item_augments(item)
-    local found = {enh = 0, levels = 0, relic = false, diffusion = false, raw = {}}
+--   '"Embolden"+N'                  Evasionist's Cape, N percent of Embolden's duration back
+--   'Summoning magic skill +N'      N skill
+--   'Indi. eff. dur. +N'            N percent Indi- spell duration
+--   'Enhances "Winning Streak" effect'   Comm. Tricorne +2
+-- `slot` is where the item is worn: weapon path augments only work in the main hand.
+local function item_augments(item, slot)
+    local found = {enh = 0, levels = 0, embolden = 0, roll = 0, summoning = 0, winning = 0, indi = 0,
+                   relic = false, diffusion = false, raw = {}}
     if not item.extdata then return found end
     local ok, decoded = pcall(extdata.decode, item)
     if not ok then
@@ -571,7 +681,17 @@ local function item_augments(item)
     -- Path items store only a path letter and rank; the value comes from buff_gear.paths.
     if decoded.path then
         local bonus = gear.paths[item.id] and gear.paths[item.id][decoded.path]
-        if bonus and bonus.enh then
+        if bonus and bonus.roll then
+            local rank = math.min(decoded.rank or 0, bonus.max_rank)
+            local seconds = bonus.roll * rank / bonus.max_rank
+            local counted = slot == 'main' or not bonus.main
+            if counted then found.roll = found.roll + seconds end
+            found.raw[#found.raw + 1] = {
+                text = ('path %s rank %s = phantom roll +%.0fs%s%s'):format(decoded.path, tostring(decoded.rank), seconds,
+                    rank < bonus.max_rank and (' (estimated below rank %d)'):format(bonus.max_rank) or '',
+                    counted and '' or ', main hand only'),
+                counted = counted}
+        elseif bonus and bonus.enh then
             local pct = bonus.enh * (decoded.rank or 0)
             found.enh = found.enh + pct
             found.raw[#found.raw + 1] = {
@@ -589,11 +709,22 @@ local function item_augments(item)
             local percent = text:match('^Enh%. Mag%. eff%. dur%. %+(%d+)')
                          or text:match('^Enhancing [Mm]agic effect duration %+(%d+)')
             local levels  = text:match('^[Aa]ll [Ss]ongs%s*%+(%d+)')
+            local embolden = text:match('^"Embolden"%+(%d+)')
+            local summoning = text:match('^Summoning magic skill %+(%d+)')
+            local indi = text:match('^Indi%. eff%. dur%. %+(%d+)')
             local counted = true
             if percent then
                 found.enh = found.enh + tonumber(percent) / 100
             elseif levels then
                 found.levels = found.levels + tonumber(levels)
+            elseif embolden then
+                found.embolden = found.embolden + tonumber(embolden) / 100
+            elseif summoning then
+                found.summoning = found.summoning + tonumber(summoning)
+            elseif indi then
+                found.indi = found.indi + tonumber(indi) / 100
+            elseif text:match('^Enhances "Winning Streak" effect') then
+                found.winning = 6
             elseif text:match('^Enhancing Magic duration') then
                 found.relic = true
             elseif text:match('^Enhances "Diffusion" effect') then
@@ -607,10 +738,11 @@ local function item_augments(item)
     return found
 end
 
--- Composure set pieces count per set family: the name's first letters give the
--- set ("Leth." / "Lethargy" -> leth, "Estq." -> estq), so every tier of a set
--- combines (confirmed in game; bg-wiki lists Lethargy base through +3 as one
--- set). Different sets do not combine.
+-- Every piece that carries 'Set: Augments "Composure"' counts toward one set:
+-- all tiers of Lethargy combine, and Estoqueur +2 pieces combine with them
+-- (both confirmed in game; bg-wiki lists them as separate sets with the same
+-- bonus). The name's first letters ("Leth." / "Lethargy" -> leth, "Estq." ->
+-- estq) only label the pieces in the report.
 local function composure_set_key(item_id)
     local item = res.items and res.items[item_id]
     local name = item and item.en or ''
@@ -621,14 +753,24 @@ end
 --   enh        gear-listed Enhancing Magic duration
 --   aug        augment Enhancing Magic duration (a separate multiplier)
 --   regen      Regen duration seconds
+--   refresh    Refresh received duration seconds
+--   enspell    Enspell duration seconds
+--   embolden   Embolden duration given back by augments (0.10 = +10%)
+--   roll       Phantom Roll duration seconds
+--   summoning  Summoning magic skill from gear
+--   winning    extra seconds per Winning Streak merit level
+--   ja         [ability name] = {sec = seconds, pct = fraction}: job ability durations
+--   indi       Indi- spell duration seconds; indi_aug the augment percentage
+--   dark       Dark magic duration percentage
 --   perp       Perpetuance multiplier bonus (2 + perp)
 --   song       all-songs duration
 --   fam        [family] = extra song duration for that family
---   composure  best Composure set bonus for the pieces worn
+--   composure  Composure set bonus for the pieces worn
 --   relic, diffusion   flags
 --   detail     [slot] = {item = item table, stats = ..., augments = ...}
 local function scan_gear()
-    local totals = {enh = 0, aug = 0, regen = 0, perp = 0, song = 0, fam = {},
+    local totals = {enh = 0, aug = 0, regen = 0, refresh = 0, enspell = 0, embolden = 0, perp = 0, song = 0, fam = {},
+                    roll = 0, summoning = 0, winning = 0, ja = {}, indi = 0, indi_aug = 0, dark = 0,
                     composure = 0, relic = false, diffusion = false, detail = {}, set_counts = ''}
     local sets  = {}
     local worn_items = equipped_items()
@@ -639,11 +781,13 @@ local function scan_gear()
     load_descriptions(unseen)       -- one pass over the file for every piece not seen before
     for slot, item in pairs(worn_items) do
         local stats    = item_stats(item.id)
-        local augments = item_augments(item)
+        local augments = item_augments(item, slot)
         totals.detail[slot] = {item = item, stats = stats, augments = augments}
 
         totals.enh   = totals.enh   + (stats.enh   or 0)
         totals.regen = totals.regen + (stats.regen or 0)
+        totals.refresh = totals.refresh + (stats.refresh or 0)
+        totals.enspell = totals.enspell + (stats.enspell or 0)
         totals.perp  = totals.perp  + (stats.perp  or 0)
         totals.song  = totals.song  + (stats.song  or 0) + 0.1 * ((stats.levels or 0) + augments.levels)
         for family, levels in pairs(stats.fam) do
@@ -651,6 +795,18 @@ local function scan_gear()
         end
         if stats.song_fixed then totals.song_fixed = math.max(totals.song_fixed or 0, stats.song_fixed) end
         totals.aug       = totals.aug + augments.enh
+        totals.embolden  = totals.embolden + augments.embolden
+        totals.roll      = totals.roll + (stats.roll or 0) + augments.roll
+        totals.summoning = totals.summoning + (stats.summoning or 0) + augments.summoning
+        totals.winning   = math.max(totals.winning, stats.winning or 0, augments.winning)
+        totals.indi      = totals.indi + (stats.indi or 0)
+        totals.indi_aug  = totals.indi_aug + augments.indi
+        totals.dark      = totals.dark + (stats.dark or 0)
+        for name, bonus in pairs(stats.ja or {}) do
+            local sum = totals.ja[name] or {sec = 0, pct = 0}
+            sum.sec, sum.pct = sum.sec + (bonus.sec or 0), sum.pct + (bonus.pct or 0)
+            totals.ja[name] = sum
+        end
         totals.relic     = totals.relic     or stats.relic     or augments.relic
         totals.diffusion = totals.diffusion or stats.diffusion or augments.diffusion
         if stats.composure then
@@ -658,12 +814,14 @@ local function scan_gear()
             sets[key] = (sets[key] or 0) + 1
         end
     end
-    local counts = {}
+    local counts, total = {}, 0
     for key, pieces in pairs(sets) do
-        totals.composure = math.max(totals.composure, gear.composureSetBonus[pieces] or 0)
+        total = total + pieces
         counts[#counts + 1] = ('%s x%d'):format(key, pieces)
     end
-    totals.set_counts = #counts > 0 and table.concat(counts, ', ') or 'no set pieces worn'
+    table.sort(counts)
+    totals.composure  = gear.composureSetBonus[math.min(total, #gear.composureSetBonus)] or 0
+    totals.set_counts = total > 0 and ('%d pieces: %s'):format(total, table.concat(counts, ', ')) or 'no set pieces worn'
     return totals
 end
 
@@ -682,12 +840,24 @@ local function gear_lines(totals)
             local function add_part(text) parts[#parts + 1] = text end
             if s.enh    then add_part(('enhancing %+.0f%%'):format(s.enh * 100)) end
             if s.regen  then add_part(('regen +%.0fs'):format(s.regen)) end
+            if s.refresh then add_part(('refresh received +%.0fs'):format(s.refresh)) end
+            if s.enspell then add_part(('enspell +%.0fs'):format(s.enspell)) end
+            if s.roll then add_part(('phantom roll +%.0fs'):format(s.roll)) end
+            if s.summoning then add_part(('summoning skill +%d'):format(s.summoning)) end
+            if s.winning or a.winning > 0 then add_part('winning streak +6s/merit') end
+            if s.indi then add_part(('indicolure +%.0fs'):format(s.indi)) end
+            if s.dark then add_part(('dark magic %+.0f%%'):format(s.dark * 100)) end
             if s.perp   then add_part(('perpetuance +%.0f%%'):format(s.perp * 100)) end
             if s.song   then add_part(('songs +%.0f%%'):format(s.song * 100)) end
             if s.levels then add_part(('all songs +%d'):format(s.levels)) end
             if s.song_fixed then add_part(('songs fixed at %.0f min'):format(s.song_fixed / 60)) end
             for family, levels in pairs(s.fam) do add_part(('%s +%d'):format(family, levels)) end
             if s.composure then add_part('composure set') end
+            for name, bonus in pairs(s.ja or {}) do
+                if name ~= 'Phantom Roll' and name ~= 'Regen' then
+                    add_part(bonus.pct and ('%s %+.0f%%'):format(name, bonus.pct * 100) or ('%s +%.0fs'):format(name, bonus.sec))
+                end
+            end
             if s.relic or a.relic then add_part('relic hands') end
             if s.diffusion or a.diffusion then add_part('diffusion') end
             for _, aug in ipairs(a.raw) do
@@ -700,8 +870,11 @@ local function gear_lines(totals)
                 #parts > 0 and table.concat(parts, ', ') or 'nothing detected')
         end
     end
-    lines[#lines + 1] = ('totals: enhancing %+.0f%% (+%.0f%% aug), regen +%.0fs, songs +%.0f%%, perpetuance x%.2f, composure +%.0f%% (%s)'):format(
-        totals.enh * 100, totals.aug * 100, totals.regen, totals.song * 100, 2 + totals.perp, totals.composure * 100, totals.set_counts)
+    lines[#lines + 1] = ('totals: enhancing %+.0f%% (+%.0f%% aug), regen +%.0fs, refresh received +%.0fs, enspell +%.0fs, songs +%.0f%%, perpetuance x%.2f, composure +%.0f%% (%s), embolden +%.0f%%'):format(
+        totals.enh * 100, totals.aug * 100, totals.regen, totals.refresh, totals.enspell, totals.song * 100, 2 + totals.perp,
+        totals.composure * 100, totals.set_counts, totals.embolden * 100)
+    lines[#lines + 1] = ('totals: phantom roll +%.0fs, winning streak +%ds/merit, summoning skill +%d, indicolure +%.0fs (+%.0f%% aug), dark magic %+.0f%%'):format(
+        totals.roll, totals.winning, totals.summoning, totals.indi, totals.indi_aug * 100, totals.dark * 100)
     return lines
 end
 
@@ -756,7 +929,8 @@ local function flat_seconds(entry, totals, player, buffs)
         if buffs[TABULA_RASA] then
             add('Tabula Rasa', 72)          -- overrides the Light Arts level bonus
         elseif light_arts and main == SCH then
-            add('Light Arts', math.floor((level - 10) / 10) * 6)
+            -- +2s per 4 levels (the Timers plugin's formula): +48 at 99, 14 at 30
+            add('Light Arts', 2 * math.floor((level - 1) / 4))
         end
         if light_arts and main == SCH and level == 99 and points.sch then
             add('SCH LA JP', 3 * (points.sch.light_arts_effect or 0))
@@ -772,12 +946,18 @@ end
 -- The most recent calculation, step by step, for `//timers2 last`.
 local last_traces = {}      -- ['others'] / ['own']
 
+-- An ability's calculation (ability_duration.lua) is kept beside the spells'.
+function M.record_ability_trace(trace)
+    last_traces.ability = trace
+end
+
 function M.describe_last()
     local lines = {}
-    for _, which in ipairs({'others', 'own'}) do
+    for _, which in ipairs({'others', 'own', 'ability'}) do
         local trace = last_traces[which]
         if trace then
-            lines[#lines + 1] = ('%s (spell %d), %s:'):format(trace.name, trace.spell_id,
+            lines[#lines + 1] = which == 'ability' and ('%s (ability %d):'):format(trace.name, trace.ability_id)
+                or ('%s (spell %d), %s:'):format(trace.name, trace.spell_id,
                 which == 'own' and 'your own copy' or 'on other players')
             for _, step in ipairs(trace.steps) do lines[#lines + 1] = '  ' .. step end
             if trace.totals then
@@ -793,16 +973,23 @@ end
 -- True when a spell lasts as long on the caster as on anyone else it hits. Songs
 -- and Blue Magic have no "received" modifiers; Enhancing Magic does (Composure
 -- triples the caster's own copy), so the caster's server time says nothing about
--- the others' there.
+-- the others' there. Neither does Battery Charge's, which our Refresh-received
+-- gear lengthens.
 function M.same_on_self(spell_id)
     local entry = spells[spell_id]
-    return entry ~= nil and (entry.kind == 'song' or entry.kind == 'blu')
+    return entry ~= nil and (entry.kind == 'song' or entry.kind == 'blu') and not entry.own_gear
 end
 
 -- A short remark about how predictable a spell's duration is, or nil.
 function M.duration_note(spell_id)
     local entry = spells[spell_id]
     return entry and entry.note
+end
+
+-- True for Indi- spells, whose timer follows Colure Active (see above).
+function M.colure(spell_id)
+    local entry = spells[spell_id]
+    return entry ~= nil and entry.colure == true
 end
 
 -- The buff id a spell's timer should be matched against when it differs from
@@ -835,6 +1022,10 @@ local function context_totals(context)
     return context.totals
 end
 
+-- For ability_duration.lua: the same caster read and gear scan.
+M.context_player = context_player
+M.context_totals = context_totals
+
 -- Seconds a spell cast by the local player is expected to last on another
 -- player, or nil if the spell is not covered (or nobody is logged in). With
 -- `own_copy` it is the caster's own buff instead: Enhancing Magic then gets
@@ -865,6 +1056,10 @@ function M.get_spell_duration(spell_id, own_copy, context, received)
     if entry.regen_gear then
         duration = duration + totals.regen
         step(('regen gear +%.0f'):format(totals.regen))
+    end
+    if entry.own_gear and own_copy then
+        duration = duration + totals[entry.own_gear]
+        step(('%s gear +%.0f (own copy)'):format(entry.own_gear, totals[entry.own_gear]))
     end
 
     if entry.kind == 'enhancing' then
@@ -903,11 +1098,14 @@ function M.get_spell_duration(spell_id, own_copy, context, received)
             duration = duration * (1 + gifts)
             step(('rune fencer gifts +%.0f%%%s'):format(gifts * 100, own_copy and '' or ' (mastered)'))
         end
-        local embolden = received.embolden
-        if embolden == nil and own_copy then embolden = buffs[M.EMBOLDEN] == true end
+        local embolden, embolden_factor = received.embolden, EMBOLDEN_DURATION
+        if embolden == nil and own_copy then
+            embolden        = buffs[M.EMBOLDEN] == true
+            embolden_factor = math.min(EMBOLDEN_DURATION + totals.embolden, 1)   -- our own cape
+        end
         if embolden then
-            duration = duration * EMBOLDEN_DURATION
-            step(('embolden -%.0f%%'):format((1 - EMBOLDEN_DURATION) * 100))
+            duration = duration * embolden_factor
+            step(('embolden -%.0f%%'):format((1 - embolden_factor) * 100))
         end
         if buffs[PERPETUANCE] then
             duration = duration * (2 + totals.perp)
@@ -946,6 +1144,13 @@ function M.get_spell_duration(spell_id, own_copy, context, received)
             if buffs[MARCATO]      then duration = duration + (points.marcato_effect or 0) end
             step('job point seconds')
         end
+        if MARCATO_FAMILIES[entry.family] then
+            if buffs[SOUL_VOICE] then
+                duration = duration * 2; step('soul voice x2')
+            elseif buffs[MARCATO] then
+                duration = duration * 1.5; step('marcato x1.5')
+            end
+        end
         -- bg-wiki "Songs": Troubadour doubles the total after every other bonus,
         -- and decimals are dropped after totaling.
         if buffs[TROUBADOUR] then duration = duration * 2; step('troubadour x2') end
@@ -982,6 +1187,32 @@ function M.get_spell_duration(spell_id, own_copy, context, received)
         step(('diffusion + charuqs +%.0f%% (%s), unbridled job points +%.0f%% (%s)'):format(
             bonus * 100, #parts > 0 and table.concat(parts, ', ') or 'none',
             unbridled * 100, entry.jp_additive and 'added' or 'multiplied'))
+    elseif entry.kind == 'indi' then
+        local jp = 0
+        if player.main_job_id == GEO and player.main_job_level == 99 then
+            -- "Indicolure Spell Effect Dur.": Windower spells the key
+            -- "indocolure" (its definitions/windower.lua; AutoGEO reads it so)
+            local points = player.job_points and player.job_points.geo or {}
+            jp = points.indocolure_spell_effect_dur or 0
+        end
+        duration = duration + totals.indi + 2 * jp
+        step(('indicolure gear +%.0f, job points %d x2'):format(totals.indi, jp))
+        duration = duration * (1 + totals.indi_aug)
+        step(('augments +%.0f%%'):format(totals.indi_aug * 100))
+    elseif entry.kind == 'dark' then
+        if entry.composure and own_copy and buffs[COMPOSURE] then
+            duration = duration * 3
+            step('composure x3 (own copy)')
+        end
+        duration = duration * (1 + totals.dark)
+        step(('dark magic duration %+.0f%%'):format(totals.dark * 100))
+    elseif entry.kind == 'ninjutsu' then
+        local points = player.main_job_id == NIN and player.main_job_level == 99
+                       and player.job_points and player.job_points.nin
+        if points and (points.jp_spent or 0) >= 550 then
+            duration = duration * (1 + NINJA_GIFT)
+            step('ninja 550 JP gift +10%')
+        end
     end
 
     if entry.cap and duration > entry.cap then duration = entry.cap; capped = true; step('cap') end

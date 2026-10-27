@@ -2,7 +2,7 @@
     Packet tracking for Timers2.
     Turns what the server sends into the buff timers held in data.lua:
 
-      0x028  our own casts and job abilities
+      0x028  our own casts and job abilities, and our avatar's Blood Pact wards
       0x029  wear-off and death messages
       0x063  our own buff list (exact remaining times)
       0x076  other party members' buff lists
@@ -16,6 +16,7 @@
 local res           = require('resources')
 local data          = require('data')
 local buff_duration = require('buff_duration')
+local ability_duration = require('ability_duration')
 local formatting    = require('formatting')
 local naturalist    = require('naturalist')
 
@@ -25,6 +26,23 @@ local settings  = {}    -- set by init; read for the calibrate switch
 local player_id = nil
 
 local resist_msgs    = {[75] = true, [283] = true}
+-- An ability that did not land on a target (Windower action_messages): "No
+-- effect on ...", including a roll or a Double-Up that missed someone. 424 is a
+-- Double-Up giving a roll (its packet carries the roll's own ability id, like
+-- the roll), 426 / 427 a bust taking the roll away.
+local ability_miss_msgs = {[75] = true, [156] = true, [283] = true, [323] = true,
+                           [422] = true, [423] = true, [425] = true, [659] = true}
+local double_up_msgs    = {[424] = true}
+-- A roll's total is the param of the messages that give it (420 / 421, and 424
+-- for Double-Up), and shows after the roll's name: "Chaos Roll XI".
+local roll_total_msgs   = {[420] = true, [421] = true, [424] = true}
+local ROMAN = {'I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X', 'XI'}
+local bust_msgs         = {[426] = true, [427] = true}
+-- "<actor> uses <ability>. <target>'s <status> effect wears off." (Fold
+-- erasing a Bust or a roll): the target action's param is the status.
+local removed_msgs      = {[321] = true, [322] = true}
+local BUST = 309
+local SMN = 15
 local buff_wore_msgs = {[64] = true, [204] = true, [206] = true, [350] = true, [531] = true}
 local death_msgs     = {[6] = true, [20] = true, [113] = true, [406] = true, [605] = true, [646] = true}
 
@@ -127,11 +145,12 @@ local function timer_id(spell, spell_id, status_id)
 end
 
 -- Removes the timer of a buff that just wore off. Songs sharing a status wear off
--- one at a time, so the song closest to expiry goes.
+-- one at a time, so the song closest to expiry goes; so do stacked copies of one
+-- status (Bust).
 local function remove_worn_song(timers, status_id, target_id)
     local soonest_key, soonest
     for key, entry in pairs(timers) do
-        if entry.song and not entry.is_aoe and entry.status_id == status_id
+        if (entry.song or entry.stacked) and not entry.is_aoe and entry.status_id == status_id
                 and (target_id == nil or entry.target_id == target_id)
                 and (not soonest or entry.expires < soonest) then
             soonest_key, soonest = key, entry.expires
@@ -170,14 +189,15 @@ end
 -- timers survive and take over the server's remaining times, paired in cast
 -- order. If the server lists more slots than we track (songs we did not cast),
 -- the closest slots are used. A status with no slot at all drops its timers
--- unless they were only just cast.
+-- unless they were only just cast. Stacked timers (two Busts) are matched the
+-- same way.
 local function apply_song_sync(timers, now)
     -- Our own song timers, plus party rows from casts that also hit us
     -- (shared_with_self): those songs hold a slot in our buff list too.
     local by_status = {}
     local function collect(holder, own)
         for key, entry in pairs(holder) do
-            if entry.song and (own or entry.shared_with_self) then
+            if (entry.song or entry.stacked) and (own or entry.shared_with_self) then
                 by_status[entry.status_id] = by_status[entry.status_id] or {}
                 table.insert(by_status[entry.status_id], {holder = holder, key = key, entry = entry, own = own})
             end
@@ -349,6 +369,62 @@ local function next_order()
     return order
 end
 
+-- Busts the action packet reported (os.clock() times) that our buff list has
+-- not shown yet. A bust can be evaded, leaving no Bust status, so the message
+-- alone makes no timer: one is made when our buff list shows a Bust slot that
+-- no timer holds yet, within BUST_CONFIRM seconds of the bust, and it takes
+-- that slot's time. A bust the list never shows was evaded.
+local pending_busts = {}
+local BUST_CONFIRM  = 5
+
+local function confirm_busts(now)
+    local live = {}
+    for _, at in ipairs(pending_busts) do
+        if now - at <= BUST_CONFIRM then live[#live + 1] = at end
+    end
+    pending_busts = live
+    if #live == 0 then return end
+    local slots, held = self_slots[BUST] or {}, 0
+    for _, entry in pairs(data.self_buff_timers) do
+        if entry.stacked and entry.status_id == BUST then held = held + 1 end
+    end
+    -- the new Bust has the most time left; apply_song_sync pairs the rest
+    local slot = #slots
+    while held < #slots and #pending_busts > 0 do
+        local busted = table.remove(pending_busts, 1)
+        local order  = next_order()
+        data.self_buff_timers['bust' .. order] = {
+            name = 'Bust', expires = slots[slot], duration = slots[slot] - busted,
+            status_id = BUST, stacked = true, calibrated = true, created_order = order,
+        }
+        held, slot = held + 1, slot - 1
+    end
+end
+
+-- Who an action landed on: the message it gave us (nil when it missed us or did
+-- not target us), and the visible party members it landed on, {id, name,
+-- message} each. A target's first action whose message is not in `misses`
+-- counts.
+local function collect_hits(act, misses)
+    local self_msg, party_hits = nil, {}
+    for _, target in ipairs(act.targets) do
+        for _, action in ipairs(target.actions) do
+            if not misses[action.message] then
+                if target.id == player_id then
+                    self_msg = action.message
+                else
+                    local mob = windower.ffxi.get_mob_by_id(target.id)
+                    if mob and not mob.is_npc then
+                        table.insert(party_hits, {id = target.id, name = mob.name, message = action.message})
+                    end
+                end
+                break
+            end
+        end
+    end
+    return self_msg, party_hits
+end
+
 local function handle_spell(act)
     local spell = res.spells[act.param]
     if not spell then return end
@@ -372,23 +448,8 @@ local function handle_spell(act)
     local verify_status = real_status ~= nil
 
     -- Collect all non-resisted targets first so we can detect AOE.
-    local hit_self   = false
-    local party_hits = {}
-    for _, target in ipairs(act.targets) do
-        for _, action in ipairs(target.actions) do
-            if not resist_msgs[action.message] then
-                if target.id == player_id then
-                    hit_self = true
-                else
-                    local mob = windower.ffxi.get_mob_by_id(target.id)
-                    if mob and not mob.is_npc then
-                        table.insert(party_hits, {id = target.id, name = mob.name})
-                    end
-                end
-                break
-            end
-        end
-    end
+    local self_msg, party_hits = collect_hits(act, resist_msgs)
+    local hit_self = self_msg ~= nil
 
     -- Our own copy: the helper's geared duration (including Composure's x3);
     -- spells it does not cover start from the resource value.
@@ -397,9 +458,12 @@ local function handle_spell(act)
 
     if hit_self and #party_hits <= 1 then
         local d = own_d or spell.duration or party_d
+        -- Indi- spells follow Colure Active (buff_duration.colure): a new one
+        -- replaces the old, whatever time the old one had left.
+        local colure = buff_duration.colure(act.param) or nil
         -- Derive remaining from cached server expiry (os.clock()-based) so the
         -- value is accurate even if the last 0x063 arrived minutes ago.
-        local cached_expiry = not song and buff_sync_expiry[status_id] or nil   -- shared by song tiers
+        local cached_expiry = not song and not colure and buff_sync_expiry[status_id] or nil   -- shared by song tiers
         local synced_remaining = cached_expiry and math.max(0, cached_expiry - now_clock) or 0
         if synced_remaining > d then d = synced_remaining end
 
@@ -408,16 +472,17 @@ local function handle_spell(act)
         local self_key = (verify_status or song) and key_id or ('spell' .. act.param)
         local existing_entry     = data.self_buff_timers[self_key]
         local existing_remaining = existing_entry and (existing_entry.expires - now_clock) or 0
-        if existing_remaining <= d then
+        if colure or existing_remaining <= d then
             data.self_buff_timers[self_key] = {
                 name=spell.name, expires=now_clock+d, duration=d,
                 status_id=status_id, song=song, group_id=group_id,
+                colure = colure,
                 unsynced = not verify_status and not song or nil,
                 model_expires = now_clock + (own_d or party_d),
                 naturalist_probe = own_d and naturalist.probe(act.param, context, now_clock) or nil,
                 prior = slots_before_cast(status_id, now_clock),
                 note = buff_duration.duration_note(act.param),
-                own_copy = not buff_duration.same_on_self(act.param),
+                own_copy = buff_duration.naturalist_applies(act.param),   -- the calibrate hint is about the roll
                 created_order=existing_entry and existing_entry.created_order or next_order(),
             }
         end
@@ -491,7 +556,7 @@ local function handle_spell(act)
             -- the party's (Enhancing Magic): no row of our own, but our 0x063
             -- slot still calibrates our estimate and can measure the roll.
             own = hit_self and own_d and not buff_duration.same_on_self(act.param) and {
-                name = spell.name, status_id = status_id, own_copy = true,
+                name = spell.name, status_id = status_id, own_copy = buff_duration.naturalist_applies(act.param),
                 model_expires = now_clock + own_d,
                 note = buff_duration.duration_note(act.param),
                 naturalist_probe = naturalist.probe(act.param, context, now_clock),
@@ -529,31 +594,222 @@ local function handle_spell(act)
     end
 end
 
-local function handle_ability(act)
-    local ability = res.job_abilities[act.param]
-    if not ability or not ability.duration or ability.duration <= 0 then return end
-    -- Only an ability that lands on us is one of our buffs; one aimed at a
-    -- monster (Bully, steps) or only at a pet is not.
-    local on_self = false
-    for _, target in ipairs(act.targets) do
-        if target.id == player_id then on_self = true; break end
+-- Party rows of one ability's buff: the single-target rows keyed
+-- "<key>_<member>" and the AOE row "aoe_<key>".
+local function ability_rows(key)
+    local rows = {}
+    for row_key, entry in pairs(data.party_buff_timers) do
+        if entry.ability_key == key then rows[row_key] = entry end
     end
-    if not on_self then return end
-    -- An ability without a status id (Spectral Jig, Konzen-ittai, ...) cannot be
-    -- confirmed by 0x063, so it is keyed apart from the buff ids and runs out.
-    local key = ability.status or ('ja' .. act.param)
-    data.self_buff_timers[key] = {
-        name=ability.name, expires=os.clock()+ability.duration, duration=ability.duration,
-        unsynced = ability.status == nil or nil,
-        created_order=next_order(),
-    }
+    return rows
 end
 
-local function handle_action(act)
+-- Party rows for an ability that landed on `hits` (one row per member, or one
+-- AOE row for several), all ending at `expires`. `info` = {name, status,
+-- suffix}: `suffix` (a roll's total) is shown after the name. With `merge` (Double-Up) an
+-- AOE row already there for this ability takes the members instead; otherwise
+-- new rows replace old ones, as a recast spell's do.
+local function add_ability_rows(info, key, hits, hit_self, expires, duration, merge)
+    if #hits == 0 then return end
+    local base = {
+        name = info.name, suffix = info.suffix, expires = expires, duration = duration,
+        status_id = info.status, verify_status = info.status ~= nil,
+        -- No one receives an ability differently from us, so a row that hit us
+        -- too follows our own buff list (sync_shared_from_self).
+        shared_with_self = hit_self or nil,
+        ability_key = key,
+    }
+    local function row(fields)
+        local entry = {created_order = next_order()}
+        for k, v in pairs(base) do entry[k] = v end
+        for k, v in pairs(fields) do entry[k] = v end
+        return entry
+    end
+    local aoe = merge and data.party_buff_timers['aoe_' .. key]
+    if aoe then
+        for _, hit in ipairs(hits) do table.insert(aoe.target_ids, hit.id) end
+    elseif #hits > 1 then
+        local ids = {}
+        for _, hit in ipairs(hits) do ids[#ids + 1] = hit.id end
+        data.party_buff_timers['aoe_' .. key] = row({is_aoe = true, target_ids = ids})
+    else
+        local hit = hits[1]
+        data.party_buff_timers[key .. '_' .. hit.id] = row({target_id = hit.id, target_name = hit.name})
+    end
+end
+
+-- Takes an ability's buff away from one target (a bust): our own timer, their
+-- row, or their place in the AOE row. Losing it ourselves also stops the rows
+-- following our buff list. An AOE row goes once it covers nobody.
+local function drop_ability_target(key, target_id)
+    if target_id == player_id then
+        data.self_buff_timers[key] = nil
+        for _, entry in pairs(ability_rows(key)) do entry.shared_with_self = nil end
+    else
+        data.party_buff_timers[key .. '_' .. target_id] = nil
+    end
+    local aoe = data.party_buff_timers['aoe_' .. key]
+    if aoe then
+        local left = {}
+        for _, id in ipairs(aoe.target_ids) do
+            if id ~= target_id then left[#left + 1] = id end
+        end
+        aoe.target_ids = left
+        if #left == 0 and not aoe.shared_with_self then data.party_buff_timers['aoe_' .. key] = nil end
+    end
+end
+
+-- Job abilities, Corsair rolls and Blood Pact wards. Like a spell: our own row
+-- when it hit us and at most one member, a row per member, or one AOE row for
+-- several (which then covers us too). Blood Pact wards come from our avatar's
+-- own action (`from_pet`), not from the summoner's command.
+local function handle_ability(act, from_pet)
+    local ability = res.job_abilities[act.param]
+    if not ability or not ability.duration or ability.duration <= 0 then return end
+    if (ability.type == 'BloodPactWard') ~= (from_pet == true) then return end
+    -- An ability without a status id (Deep Breathing, a few wards, ...) cannot be
+    -- confirmed by a buff list, so it is keyed apart from the buff ids and runs
+    -- out. Spectral Jig follows the Invisible it grants.
+    local status = ability_duration.get_status(act.param) or ability.status
+    local key = status or ('ja' .. act.param)
+    local info = {name = ability.name, status = status}
+    if ability.type == 'CorsairRoll' then
+        for _, target in ipairs(act.targets) do
+            local action = target.actions[1]
+            if action and roll_total_msgs[action.message] and ROMAN[action.param] then
+                info.suffix = ROMAN[action.param]
+                break
+            end
+        end
+    end
+
+    -- Only an ability that lands on us or a party member is a buff we time; one
+    -- aimed at a monster (Bully, steps) or only at a pet is not.
+    local self_msg, hits = collect_hits(act, ability_miss_msgs)
+    if ability_duration.lands_on_caster(act.param) then
+        -- Cover targets a party member, but the buff is ours.
+        local action = act.targets[1] and act.targets[1].actions[1]
+        self_msg = action and not ability_miss_msgs[action.message] and action.message or nil
+        hits = {}
+    end
+
+    -- A bust takes the roll from everyone it names, and usually leaves us a Bust
+    -- in its place: it holds one of the two roll slots until it wears off or
+    -- Fold erases it. Two can be up at once, so each is its own timer, matched to
+    -- our buff list's Bust slots like songs sharing a status. The timer waits
+    -- for our buff list (confirm_busts): the Bust can be evaded.
+    if bust_msgs[self_msg] then
+        drop_ability_target(key, player_id)
+        local clock = os.clock()
+        pending_busts[#pending_busts + 1] = clock
+        if clock - last_self_packet <= RACE_WINDOW then
+            confirm_busts(clock)
+            apply_song_sync(data.self_buff_timers, clock)
+        end
+    end
+    local party_hits, double_up = {}, double_up_msgs[self_msg] or false
+    for _, hit in ipairs(hits) do
+        if bust_msgs[hit.message] then
+            drop_ability_target(key, hit.id)
+        else
+            party_hits[#party_hits + 1] = hit
+            double_up = double_up or double_up_msgs[hit.message] or false
+        end
+    end
+    local hit_self = self_msg ~= nil and not bust_msgs[self_msg]
+    if not hit_self and #party_hits == 0 then return end
+
+    local now = os.clock()
+    if double_up then
+        -- Double-Up changes the roll's value, not when it was rolled: the rows
+        -- keep their time, and a member it reaches for the first time joins the
+        -- roll's time. Should the server restart the roll, our own buff list
+        -- corrects our row and every row that hit us too.
+        local existing = data.self_buff_timers[key]
+        local covered = {}
+        for _, entry in pairs(ability_rows(key)) do
+            existing = existing or entry
+            for _, id in ipairs(entry.is_aoe and entry.target_ids or {entry.target_id}) do covered[id] = true end
+        end
+        if existing then
+            -- the new total, on every row of the roll
+            if info.suffix then
+                if data.self_buff_timers[key] then data.self_buff_timers[key].suffix = info.suffix end
+                for _, entry in pairs(ability_rows(key)) do entry.suffix = info.suffix end
+            end
+            local new_hits = {}
+            for _, hit in ipairs(party_hits) do
+                if not covered[hit.id] then new_hits[#new_hits + 1] = hit end
+            end
+            add_ability_rows(info, key, new_hits, hit_self, existing.expires, existing.duration, true)
+            return
+        end
+        -- no row of the roll (it was rolled before the addon saw it): as a roll
+    end
+
+    -- Rolls and wards depend on our gear, merits, job points and skill (read as
+    -- the action lands, like a spell's midcast set); the rest keep the
+    -- resource duration.
+    local duration = ability_duration.get_ability_duration(act.param) or ability.duration
+    if hit_self and #party_hits <= 1 then
+        data.self_buff_timers[key] = {
+            name=ability.name, suffix = info.suffix, expires=now+duration, duration=duration,
+            status_id = status,
+            unsynced = status == nil or nil,
+            created_order=next_order(),
+        }
+    end
+    add_ability_rows(info, key, party_hits, hit_self, now + duration, duration)
+
+    -- As for spells: buff lists that arrived just before this action belong to it.
+    local clock = os.clock()
+    if hit_self and clock - last_self_packet <= RACE_WINDOW then sync_shared_from_self(clock) end
+    if #party_hits > 0 and clock - last_party_packet <= RACE_WINDOW then reconcile_party_timers() end
+end
+
+-- Our avatar's id, or nil. Only a Summoner (main or support job) has an avatar
+-- whose Blood Pacts we time; asked only for pet actions (category 13).
+local function avatar_id()
+    local player = windower.ffxi.get_player()
+    if not player or (player.main_job_id ~= SMN and player.sub_job_id ~= SMN) then return nil end
+    local pet = windower.ffxi.get_mob_by_target('pet')
+    return pet and pet.id
+end
+
+-- An ability that erased an effect (Fold on a Bust or a roll) names it per
+-- target. A stacked status (two Busts) loses one copy: Fold takes the one with
+-- the longest time left (bg-wiki "Fold"), and our buff list then matches the
+-- rest.
+local function handle_removals(act)
+    for _, target in ipairs(act.targets) do
+        for _, action in ipairs(target.actions) do
+            if removed_msgs[action.message] and action.param then
+                local status = action.param
+                if target.id == player_id then
+                    local latest_key, latest
+                    for key, entry in pairs(data.self_buff_timers) do
+                        if entry.stacked and entry.status_id == status and (not latest or entry.expires > latest) then
+                            latest_key, latest = key, entry.expires
+                        end
+                    end
+                    if latest_key then data.self_buff_timers[latest_key] = nil end
+                end
+                drop_ability_target(status, target.id)
+            end
+        end
+    end
+end
+
+local function handle_action(act, from_pet)
+    if from_pet then
+        if act.category == 13 then handle_ability(act, true) end
+        return
+    end
     if not player_id or act.actor_id ~= player_id then return end
     if act.category == 4 then
         handle_spell(act)
     elseif act.category == 6 or act.category == 14 or act.category == 15 then
+        handle_removals(act)
         handle_ability(act)
     end
 end
@@ -599,7 +855,10 @@ local function handle_self_buff_update(raw)
         local existing = data.self_buff_timers[buff_id]
         local stale = existing and not existing.calibrated and remaining
                       and not is_new_copy(existing.prior, now + remaining)
-        if stale then
+        if existing and existing.colure and remaining == nil then
+            -- Colure Active listed without a time: still up, on our estimate.
+            new[buff_id] = existing
+        elseif stale then
             -- Still the copy from before the cast: our timer keeps its estimate
             -- until a list shows the new one.
             new[buff_id] = existing
@@ -628,9 +887,14 @@ local function handle_self_buff_update(raw)
     -- Song timers are matched to the slots as a group (see apply_song_sync);
     -- timers without a status cannot be matched at all and run on their own clock.
     for key, entry in pairs(data.self_buff_timers) do
-        if entry.song or entry.unsynced then new[key] = entry end
+        if entry.song or entry.stacked or entry.unsynced then new[key] = entry end
+        -- A colure only just cast may not be listed yet.
+        if entry.colure and not entry.calibrated and now - (entry.expires - entry.duration) <= PARTY_BUFF_GRACE then
+            new[key] = entry
+        end
     end
     data.self_buff_timers = new
+    confirm_busts(now)
     apply_song_sync(new, now)
     sync_shared_from_self(now)
 end
@@ -744,10 +1008,14 @@ end
 
 function M.incoming(id, raw)
     if id == 0x028 then
-        -- Every action in range arrives here. The actor id (offset 0x05) is read
-        -- before the full parse, which builds tables for every target and effect.
-        if player_id and raw:unpack('I', 6) == player_id then
+        -- Every action in range arrives here. The actor id (offset 0x05) and the
+        -- category (4 bits at offset 0x0A, bit 2) are read before the full parse,
+        -- which builds tables for every target and effect.
+        local actor = player_id and raw:unpack('I', 6)
+        if actor == player_id then
             handle_action(windower.packets.parse_action(raw))
+        elseif actor and math.floor(raw:byte(11) / 4) % 16 == 13 and actor == avatar_id() then
+            handle_action(windower.packets.parse_action(raw), true)
         end
     elseif id == 0x029 then
         handle_action_message(raw)
@@ -790,6 +1058,7 @@ end
 
 -- Drops every cache built from what the server told us about the current zone.
 local function reset_server_state()
+    pending_busts = {}
     data.party_buff_timers   = {}
     data.spell_recast_peak   = {}
     data.ability_recast_peak = {}
